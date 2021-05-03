@@ -1,0 +1,536 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%  Code modified by Francisco Vasconcelos from
+%%%%
+%%%%  Drone class, feel free to add functionality as you see fit
+%%%%  Author: Daniel Butters
+%%%%  Date: 16/11/17
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+classdef Drone < handle
+    properties (Constant)
+        %width, length, height offset between centre and rotors
+        body = [0.26 0.26 0.0]; 
+%         body = [0.6 0.6 0.0];
+        
+        %time interval for simulation (seconds)
+        time_interval = 0.02;
+        
+        % size of floating window that follows drone
+        axis_size = 2.;
+        
+        %colours of each component of drone model
+        colours = [[.8 .3 .1];[.2 .2 .5];[.8 .1 .3];[.9 .6 .8];[.9 .2 .4]];
+        
+        %Follows the drone within the figure
+        %Don't use if you are simulating more than one drone!
+        %Switch to false to see the overall world view
+        drone_follow = false;
+    end
+    properties
+        %axis to draw on
+        axis
+        
+        %length of one side of the flight arena
+        spaceDim
+        
+        arm_len
+        
+        circ_points
+        
+        first_ang
+        
+        %limits of flight arena
+        spaceLimits
+        
+        %drone position
+        pos;
+        
+        count;
+        
+        %drone angles
+        theta; 
+        
+        %drone velocities
+        xdot;
+        
+        count2;
+        
+        %drone angular velocities
+        omega;
+        
+        %drone rotation matrix
+        R
+        
+        %Controller parameters
+        integral_err_z_pos
+        
+        %Simulation time
+        time
+        
+        distances
+        
+        %parameter to start drone in random position
+        pos_offset
+        
+        %number of drones
+        num_drones
+    end
+    methods
+        
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        %INSTANTIATION OF CLASS
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        function obj = Drone(axis, spaceDim, num_drones, follower)
+            if nargin > 1
+                obj.axis = axis;
+                
+                obj.spaceDim = spaceDim;
+                
+                obj.spaceLimits = [(-spaceDim/2)+10 (spaceDim/2)-10 (-spaceDim/2)+10 (spaceDim/2)-10 10 spaceDim-10];
+                
+                obj.pos = [follower;0;0];
+                
+                obj.distances = [0.3];
+                
+                obj.theta = zeros(3, 1); 
+                
+                obj.arm_len = sqrt(0.26^2 + 0.26^2);
+                
+                obj.xdot = zeros(3, 1);
+                
+                obj.count2 = 1;
+                
+                obj.circ_points = [0;0];
+                
+                obj.omega = zeros(3, 1);
+                
+                obj.first_ang = 2*pi / 100;
+                
+                obj.count = 1;
+                
+                obj.integral_err_z_pos = 0;
+                
+                obj.pos_offset = [5.*(rand - 0.5),5.*(rand - 0.5),2.5.*(rand)];
+                
+                obj.R = [1,0,0;0,1,0;0,0,1];
+                
+                obj.time = 0;
+                
+                obj.num_drones = num_drones;
+            else
+                error('Drone not initialised correctly')
+            end
+        end
+        
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        %DRAWING OF DRONE TO FIGURE
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        function draw(obj)
+            %how big should the moving window be
+            cL = obj.axis_size;
+            
+            %set to false if you want to see world view
+            if(obj.drone_follow)
+               axis([obj.pos(1)-cL obj.pos(1)+cL obj.pos(2)-cL obj.pos(2)+cL obj.pos(3)-cL obj.pos(3)+cL]);
+            end
+            
+            %create middle sphere
+            [X Y Z] = sphere(8);
+            %[X Y Z] = (obj.body(1)/5.).*[X Y Z];
+            X = (obj.body(1)/5.).*X + obj.pos(1);
+            Y = (obj.body(1)/5.).*Y + obj.pos(2);
+            Z = (obj.body(1)/5.).*Z + obj.pos(3);
+            s = surf(obj.axis,X,Y,Z);
+            set(s,'edgecolor','none','facecolor',obj.colours(1,:));
+            
+            %create side spheres
+            %front, right, back, left
+            hOff = obj.body(3)/2;
+            Lx = obj.body(1)/2;
+            Ly = obj.body(2)/2;
+            rotorsPosBody = [...
+                0    Ly    0    -Ly;
+                Lx    0    -Lx   0;
+                hOff hOff hOff hOff];
+            rotorsPosInertial = zeros(3,4);
+            for i = 1:4
+                rotorPosBody = rotorsPosBody(:,i);
+                rotorsPosInertial(:,i) = bodyToInertial(obj,rotorPosBody);
+                [X Y Z] = sphere(8);
+                X = (obj.body(1)/8.).*X + obj.pos(1) + rotorsPosInertial(1,i);
+                Y = (obj.body(1)/8.).*Y + obj.pos(2) + rotorsPosInertial(2,i);
+                Z = (obj.body(1)/8.).*Z + obj.pos(3) + rotorsPosInertial(3,i);
+                s = surf(obj.axis,X,Y,Z);
+                set(s,'edgecolor','none','facecolor',obj.colours(i+1,:));
+            end
+            obj.axis.Title.String = ['Sim Time = ',num2str(obj.time,'%f'),' seconds'];
+        end
+        
+        function vectorInertial = bodyToInertial(obj, vectorBody)
+            vectorInertial = obj.R*vectorBody;
+        end
+        
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        %SIMULATION FUNCTIONS
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        
+        %demo (not useful) code to show varying position and rotation
+        %replace with your own functions!
+        function obj = change_pos_and_orientation(obj)
+            t = obj.time;
+            
+            %vary position
+            pos_mat = [2.6*sin(t/2), 2.1*cos(t/5),(2.4*sin(t/3)*sin(t/3))] + obj.pos_offset;
+            
+            %vary orientation
+            pitch = 0.3*sin(t*15.2);
+            roll = 0.1*cos(t*33.1 + 0.5);
+            yaw = 2.*pi*sin(t);
+            rot_mat = eul2rotm([yaw, roll, pitch]);
+            
+            %update position and rotation matrix of drone
+            obj.pos = pos_mat;
+            obj.R = rot_mat;
+        end
+        
+        function obj = first_move(obj)
+            
+            I_xx = 0.0221; % arbitrary values for inertia matrix 
+            I_yy = 0.0259;
+            I_zz = 0.0354;
+            
+            m = 1.305; % mass
+            kd = 0.0464; % drag constant
+            g = [0; 0; -9.8]; 
+            
+            R_z = [cos(obj.theta(1)), -sin(obj.theta(1)), 0; sin(obj.theta(1)), cos(obj.theta(1)), 0; 0, 0, 1];
+            R_y = [cos(obj.theta(2)), 0, sin(obj.theta(2)); 0, 1, 0; -sin(obj.theta(2)), 0, cos(obj.theta(2))];
+            R_x = [1, 0, 0; 0, cos(obj.theta(3)), -sin(obj.theta(3)); 0, sin(obj.theta(3)), cos(obj.theta(3))];
+            % intertia matrix
+            R_mat = R_z * R_y * R_x;
+            
+            % intertia matrix
+            I = [I_xx 0 0; 0 I_yy 0; 0 0 I_zz];
+            
+            
+            % Thrust controller
+            % Control the Thrust and Torque as Inputs
+            Kp1 = 15.0;
+            Kd1 = 15.0;
+            Ki1 = 15.0;
+            
+            % Torque controller 
+            Kp2 = 5;
+            Kd2 = 5;
+            
+            % equilibrium points
+            desired_z_pos = 2.5;
+            desired_z_dot = 0;
+            desired_theta = [0; 0; 0];
+            desired_omega = [0; 0; 0];
+            
+            % T_B and T_B_z are thrust in body frame, change here
+            integral_z_pos = obj.integral_err_z_pos + (obj.pos(3) - desired_z_pos) * obj.time_interval;
+            T_B_z = -Kp1*(obj.pos(3) - desired_z_pos) - Kd1*(obj.xdot(3) - desired_z_dot) - Ki1*integral_z_pos;
+            obj.integral_err_z_pos = integral_z_pos;
+            T_B = [0; 0; T_B_z];
+            
+            % change torque
+            torques = -Kp2*(obj.theta - desired_theta) - Kd2*(obj.omega - desired_omega); 
+            
+            
+            % Convert thrust into intertial frame 
+            a = g + 1 / m * (R_mat*(T_B)) - kd .* obj.xdot;
+            
+            % Angular acceleration
+            omegadot = inv(I) * (torques - cross(obj.omega, I * obj.omega));       
+            
+            % Change all physical parameters accordingly
+            obj.omega = obj.omega + obj.time_interval * omegadot;
+            thetadot = inv([1 0 -sin(obj.theta(2)); 0 cos(obj.theta(1)) cos(obj.theta(2))*sin(obj.theta(1)); 0 -sin(obj.theta(1)) cos(obj.theta(2))*cos(obj.theta(1))]) * obj.omega;
+            obj.theta = obj.theta + obj.time_interval * thetadot;
+            obj.xdot = obj.xdot + obj.time_interval * a;
+            obj.pos = obj.pos + obj.time_interval * obj.xdot;
+            
+            disp("Position: ")
+            disp(obj.pos);
+%             disp("Linear velocities: ")
+%             disp(obj.xdot);
+            rot_mat = eul2rotm([obj.theta(1), obj.theta(2), obj.theta(3)]);
+            obj.R = rot_mat;
+        end
+        
+        function obj = second_move(obj)     
+            I_xx = 0.0221; % arbitrary values for inertia matrix 
+            I_yy = 0.0259;
+            I_zz = 0.0354;
+            
+            m = 1.305; % mass
+            kd = 0.0613; % drag constant
+            g = [0; 0; -9.8]; 
+            
+            R_z = [cos(obj.theta(1)), -sin(obj.theta(1)), 0; sin(obj.theta(1)), cos(obj.theta(1)), 0; 0, 0, 1];
+            R_y = [cos(obj.theta(2)), 0, sin(obj.theta(2)); 0, 1, 0; -sin(obj.theta(2)), 0, cos(obj.theta(2))];
+            R_x = [1, 0, 0; 0, cos(obj.theta(3)), -sin(obj.theta(3)); 0, sin(obj.theta(3)), cos(obj.theta(3))];
+            % intertia matrix
+            R_mat = R_z * R_y * R_x;
+            I = [I_xx 0 0; 0 I_yy 0; 0 0 I_zz];
+            
+            
+            % Thrust controller
+            % Control the Thrust and Torque as Inputs
+            Kp1 = 15.0;%20.0;
+            Kd1 = 6.0;
+            Ki1 = 6.0; %6.0
+            
+            % Torque controller 
+            Kp2 = 10; % was 10
+            Kd2 = 2;
+            
+            % equilibrium points
+            desired_z_pos = 2.5;
+            desired_z_dot = 0;
+            
+            
+            point = [(cos(obj.first_ang) * 2.5) - 2.5; (sin(obj.first_ang) * 2.5)];
+            
+            obj.circ_points = [obj.circ_points, [point(1);point(2)]];
+            
+%             scatter(point(1), point(2));
+
+            diff_x = (point(1)+20) - (obj.pos(1)+20);
+            diff_y = (point(2)+20) - (obj.pos(2)+20);
+            
+            overall_distance = sqrt(diff_x^2 + diff_y^2);
+           
+            
+
+            % T_B and T_B_z are thrust in body frame, change here
+            integral_z_pos = obj.integral_err_z_pos + (obj.pos(3) - desired_z_pos) * obj.time_interval;
+            T_B_z = -Kp1*(obj.pos(3) - desired_z_pos) - Kd1*(obj.xdot(3) - desired_z_dot) - Ki1*integral_z_pos;
+            
+            obj.integral_err_z_pos = integral_z_pos;
+            T_B = [0; 0; T_B_z];
+            
+            
+            a = g + (1 / m) * (R_mat*(T_B)) - kd .* obj.xdot;
+            
+
+            mid_val = diff_x;
+            end_val = -diff_y;
+
+
+            t1 = 0.8 * mid_val;
+            t2 = 0.8 * end_val;
+
+            desired_theta = [0; t1 - 0.5 * obj.xdot(1); t2 + 0.5 * obj.xdot(2)];
+
+            desired_omega = [0; 0; 0];
+
+            % change torque
+            torques = -Kp2*(obj.theta - desired_theta) - Kd2*(obj.omega - desired_omega); 
+            % Angular acceleration
+            omegadot = inv(I) * (torques - cross(obj.omega, I * obj.omega));       
+            
+            % Change all physical parameters accordingly
+            obj.omega = obj.omega + obj.time_interval * omegadot;
+            thetadot = inv([1 0 -sin(obj.theta(2)); 0 cos(obj.theta(1)) cos(obj.theta(2))*sin(obj.theta(1)); 0 -sin(obj.theta(1)) cos(obj.theta(2))*cos(obj.theta(1))]) * obj.omega;
+            obj.theta = obj.theta + obj.time_interval * thetadot;
+            obj.xdot = obj.xdot + obj.time_interval * a;
+            obj.pos = obj.pos + obj.time_interval * obj.xdot;
+            
+            if (overall_distance < 0.25)
+                if (obj.count2 < 100)
+                    obj.first_ang = obj.first_ang + 2*pi / 100;
+                    obj.count2 = obj.count2 + 1;    
+                end
+            end
+            if (obj.count2 == 100)
+                if ((obj.xdot(1)^2 + obj.xdot(2)^2) < 0.02)
+                    obj.count = obj.count + 1;
+                end
+            end
+            rot_mat = eul2rotm([obj.theta(1), obj.theta(2), obj.theta(3)]);
+            obj.R = rot_mat;
+        end   
+        
+        function obj = fllo_move(obj, other_drone)     
+            I_xx = 0.0221; % arbitrary values for inertia matrix 
+            I_yy = 0.0259;
+            I_zz = 0.0354;
+           
+            m = 1.305; % mass
+            kd = 0.0613; % drag constant
+            g = [0; 0; -9.8]; 
+            R_z = [cos(obj.theta(1)), -sin(obj.theta(1)), 0; sin(obj.theta(1)), cos(obj.theta(1)), 0; 0, 0, 1];
+            R_y = [cos(obj.theta(2)), 0, sin(obj.theta(2)); 0, 1, 0; -sin(obj.theta(2)), 0, cos(obj.theta(2))];
+            R_x = [1, 0, 0; 0, cos(obj.theta(3)), -sin(obj.theta(3)); 0, sin(obj.theta(3)), cos(obj.theta(3))];
+            % intertia matrix
+            R_mat = R_z * R_y * R_x;
+            I = [I_xx 0 0; 0 I_yy 0; 0 0 I_zz];
+            % Thrust controller
+            % Control the Thrust and Torque as Inputs
+            Kp1 = 15.0;%20.0;
+            Kd1 = 6.0;
+            Ki1 = 6.0; %6.0
+            % Torque controller 
+            Kp2 = 10; % was 10
+            Kd2 = 2;
+            % equilibrium points
+            desired_z_pos = 2.5;
+            desired_z_dot = 0;
+            
+            if (obj.time > 10 && sqrt(other_drone.pos(1)^2 + other_drone.pos(2)^2) < 0.3)
+                point = [0.3; 0];
+            else
+                point = [other_drone.pos(1); other_drone.pos(2)];
+            end
+            
+            %0.21213203435
+
+            diff_x = (point(1)+20) - (obj.pos(1)+20);
+            diff_y = (point(2)+20) - (obj.pos(2)+20);
+            
+            drone_dist = sqrt((other_drone.pos(1) - obj.pos(1))^2 + (other_drone.pos(2) - obj.pos(2))^2);
+            display(drone_dist)
+            
+            obj.distances = [obj.distances, drone_dist];
+            
+
+            % T_B and T_B_z are thrust in body frame, change here
+            integral_z_pos = obj.integral_err_z_pos + (obj.pos(3) - desired_z_pos) * obj.time_interval;
+            T_B_z = -Kp1*(obj.pos(3) - desired_z_pos) - Kd1*(obj.xdot(3) - desired_z_dot) - Ki1*integral_z_pos;
+            
+            obj.integral_err_z_pos = integral_z_pos;
+            T_B = [0; 0; T_B_z];
+            
+            a = g + (1 / m) * (R_mat*(T_B)) - kd .* obj.xdot;
+
+            mid_val = diff_x;
+            end_val = -diff_y;
+            
+            t1 = (0.8 * mid_val);
+            t2 = (0.8 * end_val);
+           
+            desired_theta = [0; t1 - 0.5 * obj.xdot(1); t2 + 0.5 * obj.xdot(2)];
+
+            desired_omega = [0; 0; 0];
+
+            % change torque
+            torques = -Kp2*(obj.theta - desired_theta) - Kd2*(obj.omega - desired_omega); 
+            % Angular acceleration
+            omegadot = inv(I) * (torques - cross(obj.omega, I * obj.omega));       
+            
+            % Change all physical parameters accordingly
+            obj.omega = obj.omega + obj.time_interval * omegadot;
+            thetadot = inv([1 0 -sin(obj.theta(2)); 0 cos(obj.theta(1)) cos(obj.theta(2))*sin(obj.theta(1)); 0 -sin(obj.theta(1)) cos(obj.theta(2))*cos(obj.theta(1))]) * obj.omega;
+            obj.theta = obj.theta + obj.time_interval * thetadot;
+            obj.xdot = obj.xdot + obj.time_interval * a;
+            obj.pos = obj.pos + obj.time_interval * obj.xdot;
+            
+            rot_mat = eul2rotm([obj.theta(1), obj.theta(2), obj.theta(3)]);
+            obj.R = rot_mat;
+        end   
+        
+        function obj = third_move(obj)
+            
+            I_xx = 0.0221; % arbitrary values for inertia matrix 
+            I_yy = 0.0259;
+            I_zz = 0.0354;
+            
+            m = 1.305; % mass
+            kd = 0.0464; % drag constant
+            g = [0; 0; -9.8]; 
+            
+            R_z = [cos(obj.theta(1)), -sin(obj.theta(1)), 0; sin(obj.theta(1)), cos(obj.theta(1)), 0; 0, 0, 1];
+            R_y = [cos(obj.theta(2)), 0, sin(obj.theta(2)); 0, 1, 0; -sin(obj.theta(2)), 0, cos(obj.theta(2))];
+            R_x = [1, 0, 0; 0, cos(obj.theta(3)), -sin(obj.theta(3)); 0, sin(obj.theta(3)), cos(obj.theta(3))];
+            % intertia matrix
+            R_mat = R_z * R_y * R_x;
+            
+            % intertia matrix
+            I = [I_xx 0 0; 0 I_yy 0; 0 0 I_zz];
+            
+            
+            % Thrust controller
+            % Control the Thrust and Torque as Inputs
+            Kp1 = 1;
+            Kd1 = 10;
+            Ki1 = 1;
+            
+            % Torque controller 
+            Kp2 = 1;
+            Kd2 = 1;
+            
+            % equilibrium points
+            desired_z_pos = obj.pos(3) - 0.0001;
+            desired_z_dot = 0;
+            desired_theta = [0; 0; 0];
+            desired_omega = [0; 0; 0];
+            
+            % T_B and T_B_z are thrust in body frame, change here
+            integral_z_pos = obj.integral_err_z_pos + (obj.pos(3) - desired_z_pos) * obj.time_interval;
+            T_B_z = -Kp1*(obj.pos(3) - desired_z_pos) - Kd1*(obj.xdot(3) - desired_z_dot) - Ki1*integral_z_pos;
+            obj.integral_err_z_pos = integral_z_pos;
+            T_B = [0; 0; T_B_z];
+            
+            % change torque
+            torques = -Kp2*(obj.theta - desired_theta) - Kd2*(obj.omega - desired_omega); 
+            
+            
+            % Convert thrust into intertial frame 
+            a = g + 1 / m * (R_mat*(T_B)) - kd .* obj.xdot;
+            
+            % Angular acceleration
+            omegadot = inv(I) * (torques - cross(obj.omega, I * obj.omega));       
+            
+            % Change all physical parameters accordingly
+            obj.omega = obj.omega + obj.time_interval * omegadot;
+            thetadot = inv([1 0 -sin(obj.theta(2)); 0 cos(obj.theta(1)) cos(obj.theta(2))*sin(obj.theta(1)); 0 -sin(obj.theta(1)) cos(obj.theta(2))*cos(obj.theta(1))]) * obj.omega;
+            obj.theta = obj.theta + obj.time_interval * thetadot;
+            obj.xdot = obj.xdot + obj.time_interval * a;
+            obj.pos = obj.pos + obj.time_interval * obj.xdot;
+            if (obj.pos(3) < 0)
+                obj.pos(3) = 0;
+                obj.xdot(1) = 0;
+                obj.xdot(2) = 0;
+                obj.xdot(3) = 0;
+            end
+            disp("Linear velocities: ")
+            disp(obj.xdot);
+            rot_mat = eul2rotm([obj.theta(1), obj.theta(2), obj.theta(3)]);
+            obj.R = rot_mat;
+        end
+      
+        function update(obj, fllo, other_drone)
+            %update simulation time
+            obj.time = obj.time + obj.time_interval;
+            
+            %change position and orientation of drone
+            %obj = change_pos_and_orientation(obj);
+            if obj.count == 1
+                if (obj.pos(3) > 2.5)
+                    obj.count = obj.count + 1;
+                end
+            end
+            if(fllo == 0)
+                if (obj.count == 1)
+                    obj = first_move(obj);
+                elseif (obj.count == 2)
+                    obj = second_move(obj);
+                elseif (obj.count == 3)
+                    obj = third_move(obj);
+                end
+            elseif(fllo == 1)
+                if (obj.count == 1)
+                    obj = first_move(obj);
+                elseif (obj.count == 2)
+                    obj = fllo_move(obj, other_drone);
+                elseif (obj.count == 3)
+                    obj = third_move(obj);
+                end
+            end
+            %draw drone on figure
+            draw(obj);
+        end
+    end
+end
